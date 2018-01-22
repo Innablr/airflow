@@ -1,0 +1,153 @@
+version: '2'
+services:
+    redis:
+        image: 'redis:3.2.7'
+
+    postgres:
+        image: postgres:9.6
+        environment:
+            - POSTGRES_USER=airflow
+            - POSTGRES_PASSWORD=airflow
+            - POSTGRES_DB=airflow
+            - POSTGRES_PORT=5432
+
+    webserver:
+        image: 992962979097.dkr.ecr.ap-southeast-2.amazonaws.com/airflow:latest
+        restart: always
+        volumes:
+            - ~/.aws:/usr/local/airflow/.aws:cached
+            - ../airflow-dags/jobs:/usr/local/airflow/jobs:cached
+        depends_on:
+            - postgres
+            - redis
+            - scheduler
+        environment:
+            - POSTGRES_HOST=postgres
+            - POSTGRES_DB=airflow
+            - POSTGRES_PORT=5432
+            - POSTGRES_USER=airflow
+            - POSTGRES_PASSWORD=airflow
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - REDIS_DB_NUMBER=1
+            - WEBSERVER_HOSTNAME=localhost:8080
+            - WORKER_POOL_SIZE=20
+            - WORKER_QUEUE=t2.small
+            - EXEC_MODE=LOCAL
+        links:
+            - postgres:postgres
+            - redis:redis
+        ports:
+            - "8080:8080"
+        command: webserver
+
+    flower:
+        image: 992962979097.dkr.ecr.ap-southeast-2.amazonaws.com/airflow:latest
+        restart: always
+        volumes:
+            - ~/.aws:/usr/local/airflow/.aws:cached
+            - ../airflow-dags/jobs:/usr/local/airflow/jobs:cached
+        depends_on:
+            - postgres
+            - redis
+            - scheduler
+        environment:
+            - POSTGRES_HOST=postgres
+            - POSTGRES_DB=airflow
+            - POSTGRES_PORT=5432
+            - POSTGRES_USER=airflow
+            - POSTGRES_PASSWORD=airflow
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - REDIS_DB_NUMBER=1
+            - WEBSERVER_HOSTNAME=localhost:8080
+            - WORKER_POOL_SIZE=20
+            - WORKER_QUEUE=t2.small
+            - EXEC_MODE=LOCAL
+        links:
+            - postgres:postgres
+            - redis:redis
+        ports:
+            - "5555:5555"
+        command: flower
+
+    scheduler:
+        image: 992962979097.dkr.ecr.ap-southeast-2.amazonaws.com/airflow:latest
+        restart: always
+        volumes:
+            - ~/.aws:/usr/local/airflow/.aws:cached
+            - ../airflow-dags/jobs:/usr/local/airflow/jobs:cached
+        depends_on:
+            - postgres
+            - redis
+        environment:
+            - POSTGRES_HOST=postgres
+            - POSTGRES_DB=airflow
+            - POSTGRES_PORT=5432
+            - POSTGRES_USER=airflow
+            - POSTGRES_PASSWORD=airflow
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - REDIS_DB_NUMBER=1
+            - WEBSERVER_HOSTNAME=localhost:8080
+            - WORKER_POOL_SIZE=20
+            - WORKER_QUEUE=t2.small
+            - EXEC_MODE=LOCAL
+        links:
+            - postgres:postgres
+            - redis:redis
+        command: scheduler
+
+    worker:
+        image: 992962979097.dkr.ecr.ap-southeast-2.amazonaws.com/airflow:latest
+        restart: always
+        volumes:
+            - ~/.aws:/usr/local/airflow/.aws:cached
+            - ../airflow-dags/jobs:/usr/local/airflow/jobs:cached
+        depends_on:
+            - postgres
+            - redis
+            - scheduler
+        environment:
+            - POSTGRES_HOST=postgres
+            - POSTGRES_DB=airflow
+            - POSTGRES_PORT=5432
+            - POSTGRES_USER=airflow
+            - POSTGRES_PASSWORD=airflow
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - REDIS_DB_NUMBER=1
+            - WEBSERVER_HOSTNAME=localhost:8080
+            - C_FORCE_ROOT=true
+            - WORKER_POOL_SIZE=20
+            - WORKER_QUEUE=t2.small
+            - EXEC_MODE=LOCAL
+        ports:
+            - "8793:8793"
+        command: worker
+
+    dag_deploy:
+        image: 992962979097.dkr.ecr.ap-southeast-2.amazonaws.com/airflow:latest
+        restart: always
+        volumes:
+            - ~/.aws:/usr/local/airflow/.aws:cached
+            - ../airflow-dags/jobs:/usr/local/airflow/jobs:cached
+        depends_on:
+            - postgres
+            - redis
+            - scheduler
+        environment:
+            - POSTGRES_HOST=postgres
+            - POSTGRES_DB=airflow
+            - POSTGRES_PORT=5432
+            - POSTGRES_USER=airflow
+            - POSTGRES_PASSWORD=airflow
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - REDIS_DB_NUMBER=1
+            - WEBSERVER_HOSTNAME=localhost
+            - WORKER_POOL_SIZE=2
+            - WORKER_QUEUE=t2.small
+            - EXEC_MODE=LOCAL
+            - ENVIRONMENT=development
+        command: /dag_deploy.sh

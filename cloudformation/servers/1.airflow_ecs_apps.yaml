@@ -1,0 +1,830 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Airflow App Stack
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy the Airflow App Stack into
+    Default: vpc-7ff3541b
+  ELBSubnets:
+    Description: List of the subnets for the Load Balancers
+    Type: List<AWS::EC2::Subnet::Id>
+    ConstraintDescription : must be a list of valid subnets for the selected Virtual Private Cloud
+    Default: subnet-34a02a42,subnet-a98deecd
+  ELBScheme:
+    Description: internal or internet-facing
+    Type: String
+    Default: internet-facing
+  AppSubnets:
+    Description: Subnets for the ECS Clusters Autoscaling Group
+    Type: List<AWS::EC2::Subnet::Id>
+    ConstraintDescription : must be a list of valid subnets for the selected Virtual Private Cloud
+    Default: subnet-1aa02a6c,subnet-dd6102b9
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: For SSH Access
+    Default: innablr-dev-dan
+  EcsInstanceRole:
+    Type: String
+    Description: The IAM role that the docker container host instance will use
+    Default: ecsInstanceRole
+  EcsServiceRole:
+    Type: String
+    Description: The IAM role that the docker containers will use
+    Default: ecsServiceRole
+  SSHIPRanges:
+    Type: CommaDelimitedList
+    Description: Private origin CIDR for traffic to the cluster - MUST be 3 long list (or edit the SG using it below)
+    Default: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+  AirflowImageRepository:
+    Type: String
+    Description: The name of the Docker repository
+    Default: 055213226771.dkr.ecr.ap-southeast-2.amazonaws.com
+  AirflowImageName:
+    Type: String
+    Description: The name of the image in the repository
+    Default: airflow
+  AirflowVersionTag:
+    Type: String
+    Description: The version of the container image for docker to run
+    Default: latest
+  EcsInstanceType:
+    Type: String
+    Description: The EC2 instance type for the host
+    AllowedValues:
+      - t2.small
+      - t2.medium
+      - t2.large
+    Default: t2.small
+  EFileSystem:
+    Type: String
+    Description: The type of system required for EFS - most likely HVM64
+    Default: HVM64
+  WebServersMaxClusterSize:
+    Type: Number
+    Description: Max number of Cluster Servers
+    Default: 2
+  WebServersDesiredClusterSize:
+    Type: Number
+    Description: Desired number of Cluster Servers
+    Default: 2
+  WebServersMinClusterSize:
+    Type: Number
+    Description: Minimum number of Cluster Servers
+    Default: 2
+  WorkersQueueMonitorList:
+    Type: String
+    Description: queue names to use for monitoring service (comma delimited)
+    Default: t2.small
+  DefaultWorkerQueue:
+    Type: String
+    Description: default queue for servers to sent to
+    Default: t2.small
+  DefaultWorkerConcurrency:
+    Type: String
+    Description: default number of workers to start - essential for celery to work on every server
+    Default: 8
+  EcsClusterTagSchedule:
+    Type: String
+    Description: Availability schedule tag to configure on the ECS cluster members
+    Default: Stop=20:30|Mon-Fri;Override=off
+  EcsClusterTagApplicationName:
+    Type: String
+    Description: Application name tag
+    Default: Airflow
+  EcsClusterTagEnvironment:
+    Type: String
+    Description: Environment name tag
+    Default: development
+  EcsClusterTagOwnerDescription:
+    Type: String
+    Description: Owner Description tag
+    Default: dan@nowhere.com
+  EcsClusterTagCostCentre:
+    Type: String
+    Description: Cost Centre tag
+    Default: Analytics
+  PostgresDBScheme:
+    Type: String
+    Description: Postgres Database schema name
+    Default: airflow
+  PostgresDBHost:
+    Type: String
+    Description: Postgres Database server
+    Default: dev.cs7dqi8chzib.ap-southeast-2.rds.amazonaws.com
+  PostgresDBPort:
+    Type: Number
+    Description: Postgres Database port
+    Default: 5432
+  PostgresDBUser:
+    Type: String
+    Description: Postgres Database username
+    Default: administrator
+  PostgresDBPassword:
+    Type: String
+    Description: Postgres Database password (To be replaced with param and key name for entrypoint to grab)
+    Default: airflow1
+  FernetKey:
+    Type: String
+    Description: Secret key for generating the symetric encryption within Airflow (between servers)
+    Default: xDrkhb87MzHHWjTjI7b48I_RpsR9fKbLqnza3jidWAo=
+  RedisHost:
+    Type: String
+    Description: Redis host name
+    Default: dev.uoyjeg.0001.apse2.cache.amazonaws.com
+  RedisPort:
+    Type: Number
+    Description: Redis port number
+    Default: 6379
+  RedisDBNumber:
+    Type: Number
+    Description: Redis db schema number
+    Default: 1
+  LogBucket:
+    Type: String
+    Description: The log bucket to send the worker logs to when they finish
+    Default: airflowworkerlogs
+  BindPassword:
+    Type: String
+    Description: The password for the webserver's user for binding to LDAP
+    Default: PARAM.airflow.bind_password
+  SuperUserADGroup1:
+    Type: String
+    Description: The AD user group to user as the super user group
+    Default: none
+  SuperUserADGroup2:
+    Type: String
+    Description: The AD user group to user as the super user group
+    Default: none
+  OauthSlackToken:
+    Type: String
+    Description: The token to use to send send slack messages with
+  DagDeploymentBranch:
+    Type: String
+    Description: The branch being used to deploy dags from
+    Default: master
+  DagDeploymentRepo:
+    Type: String
+    Description: The repository being used for deployment
+    Default: analytics-generic-dev
+
+
+Mappings:
+  RegionalConfiguration:
+    ap-southeast-2:
+      EcsAmi: ami-42e9f921
+      ElbAccountId: 783225319266
+    eu-west-1:
+      EcsAmi: ami-809f84e6
+      ElbAccountId: 156460612806
+
+Outputs:
+  WebserverURL:
+    Value: !Sub http://${WebserverLoadBalancer.DNSName}
+  FlowerURL:
+    Value: !Sub http://${FlowerLoadBalancer.DNSName}
+  efsshareddags:
+    Value: !Ref FileSystem
+  efsSecurityGroup:
+    Value: !Ref MountTargetSecurityGroup
+
+Resources:
+  AlbLogS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketName: !Sub ${AWS::StackName}-airflow-lb
+
+  AirflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  MountTargetSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Security group for mount target
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '2049'
+        ToPort: '2049'
+        CidrIp: 10.0.0.0/0
+
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+      FileSystemTags:
+      - Key: Name
+        Value:
+          !Sub ${AWS::StackName}-airflow-dag-FileSystem
+
+  MountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: FileSystem
+      SubnetId: !Select [0, !Ref AppSubnets]
+      SecurityGroups:
+      - Ref: MountTargetSecurityGroup
+
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: FileSystem
+      SubnetId: !Select [1, !Ref AppSubnets]
+      SecurityGroups:
+      - Ref: MountTargetSecurityGroup
+
+  MountTarget3:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: FileSystem
+      SubnetId: !Select [2, !Ref AppSubnets]
+      SecurityGroups:
+      - Ref: MountTargetSecurityGroup
+
+  AirflowWebserversEcsClusterSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permit traffic from ALB to the cluster members
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Select [0, !Ref SSHIPRanges]
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Select [1, !Ref SSHIPRanges]
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Select [2, !Ref SSHIPRanges]
+        - IpProtocol: tcp
+          FromPort: 5555
+          ToPort: 5555
+          SourceSecurityGroupId: !Ref FlowerLoadBalancerSG
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref WebserverLoadBalancerSG
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-APP
+
+  WebserverLoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SecurityGroup for the Airflow Webserver Load Balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Webserver-LB
+
+  FlowerLoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SecurityGroup for the Flower Load Balancer to monitor Celery for Airflow
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Flower-LB
+
+  AirflowEcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DeletionPolicy: Retain
+    Properties:
+      Roles:
+        - !Ref EcsInstanceRole
+
+  AirflowWebserversEcsCluster:
+    Type: AWS::ECS::Cluster
+
+  AirflowWebserversEcsLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [RegionalConfiguration, !Ref "AWS::Region", EcsAmi]
+      InstanceType: !Ref EcsInstanceType
+      InstanceMonitoring: true
+      IamInstanceProfile: !Ref AirflowEcsInstanceProfile
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - !Ref AirflowWebserversEcsClusterSG
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #cloud-config
+            write_files:
+              - path: /tmp/mount_efs.sh
+                permissions: '0770'
+                content: |
+                  #!/bin/bash -xe
+                  yum install -y aws-cfn-bootstrap nfs-utils aws-cli
+                  mkdir /efs_mount
+                  INTERFACE=$(curl --silent http://169.254.169.254/latest/meta-data/network/interfaces/macs/)
+                  SUBNET_ID=$(curl --silent http://169.254.169.254/latest/meta-data/network/interfaces/macs/$INTERFACE/subnet-id)
+                  EFS_IP=$(aws efs describe-mount-targets --file-system-id ${FileSystem} --region ${AWS::Region} --output text | grep  $SUBNET_ID | awk -F '\t' '{print $3}')
+                  MOUNT_IP_COUNT=$(grep -c $EFS_IP /etc/fstab)
+                  if [ $MOUNT_IP_COUNT -eq 0 ]; then
+                      echo "$EFS_IP:/ /efs_mount nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0" >> /etc/fstab
+                  fi
+            runcmd:
+              - stop ecs
+              - /bin/bash /tmp/mount_efs.sh
+              - echo ECS_CLUSTER=${AirflowWebserversEcsCluster} >> /etc/ecs/ecs.config
+              - mount -a -t nfs4
+              - chmod 777 /efs_mount
+              - /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
+              - start ecs
+
+  AirflowWebserverAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+    Properties:
+      LaunchConfigurationName: !Ref AirflowWebserversEcsLaunchConfiguration
+      VPCZoneIdentifier: !Ref AppSubnets
+      MaxSize: !Ref WebServersMaxClusterSize
+      MinSize: !Ref WebServersMinClusterSize
+      DesiredCapacity: !Ref WebServersDesiredClusterSize
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-airflow-webservers-cluster
+          PropagateAtLaunch: true
+        - Key: Schedule
+          Value: !Ref EcsClusterTagSchedule
+          PropagateAtLaunch: true
+        - Key: Application
+          Value: !Ref EcsClusterTagApplicationName
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref EcsClusterTagEnvironment
+          PropagateAtLaunch: true
+        - Key: Service
+          Value: Airflow
+          PropagateAtLaunch: true
+        - Key: CostCentre
+          Value: !Ref EcsClusterTagCostCentre
+          PropagateAtLaunch: true
+        - Key: OwnerDescription
+          Value: !Ref EcsClusterTagOwnerDescription
+          PropagateAtLaunch: true
+
+  WebserverLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: !Ref ELBScheme
+      SecurityGroups:
+        - !Ref WebserverLoadBalancerSG
+      Subnets: !Ref ELBSubnets
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: false
+
+  WebserverAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WebserverLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - TargetGroupArn: !Ref WebserverAlbTargetGroup
+          Type: forward
+
+  WebserverAlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 6
+      Matcher:
+        HttpCode: 200,302
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+
+  FlowerLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: !Ref ELBScheme
+      SecurityGroups:
+        - !Ref FlowerLoadBalancerSG
+      Subnets: !Ref ELBSubnets
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: false
+
+  FlowerAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref FlowerLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - TargetGroupArn: !Ref FlowerAlbTargetGroup
+          Type: forward
+
+  FlowerAlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 5555
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 6
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+
+  WebserverTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Volumes:
+        - Name: efs_mount
+          Host:
+            SourcePath: /efs_mount
+      ContainerDefinitions:
+        - Name: webserver
+          Image: !Sub ${AirflowImageRepository}/${AirflowImageName}:${AirflowVersionTag}
+          MemoryReservation: 256
+          Essential: true
+          MountPoints:
+            - SourceVolume: efs_mount
+              ContainerPath: /usr/local/airflow/jobs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AirflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: web
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 8080
+          Environment:
+            - Name: POSTGRES_HOST
+              Value: !Ref PostgresDBHost
+            - Name: POSTGRES_DB
+              Value: !Ref PostgresDBScheme
+            - Name: POSTGRES_PORT
+              Value: !Ref PostgresDBPort
+            - Name: POSTGRES_USER
+              Value: !Ref PostgresDBUser
+            - Name: POSTGRES_PASSWORD
+              Value: !Ref PostgresDBPassword
+            - Name: REDIS_HOST
+              Value: !Ref RedisHost
+            - Name: REDIS_PORT
+              Value: !Ref RedisPort
+            - Name: REDIS_DB_NUMBER
+              Value: !Ref RedisDBNumber
+            - Name: WEBSERVER_HOSTNAME
+              Value: !Sub ${WebserverLoadBalancer.DNSName}
+            - Name: FERNET_KEY
+              Value: !Ref FernetKey
+            - Name: WORKER_QUEUE
+              Value: !Ref DefaultWorkerQueue
+            - Name: WORKER_POOL_SIZE
+              Value: !Ref DefaultWorkerConcurrency
+            - Name: WORKER_LOG_BUCKET
+              Value: !Ref LogBucket
+            - Name: BIND_PASSWORD
+              Value: !Ref BindPassword
+            - Name: SUPER_USER_GROUP1
+              Value: !Ref SuperUserADGroup1
+            - Name: SUPER_USER_GROUP2
+              Value: !Ref SuperUserADGroup2
+            - Name: OAUTH_SLACK_TOKEN
+              Value: !Ref OauthSlackToken
+          Command:
+            - webserver
+
+  FlowerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Volumes:
+        - Name: efs_mount
+          Host:
+            SourcePath: /efs_mount
+      ContainerDefinitions:
+        - Name: flower
+          Image: !Sub ${AirflowImageRepository}/${AirflowImageName}:${AirflowVersionTag}
+          MemoryReservation: 256
+          Essential: true
+          MountPoints:
+            - SourceVolume: efs_mount
+              ContainerPath: /usr/local/airflow/jobs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AirflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: web
+          PortMappings:
+            - ContainerPort: 5555
+              HostPort: 5555
+          Environment:
+            - Name: POSTGRES_HOST
+              Value: !Ref PostgresDBHost
+            - Name: POSTGRES_DB
+              Value: !Ref PostgresDBScheme
+            - Name: POSTGRES_PORT
+              Value: !Ref PostgresDBPort
+            - Name: POSTGRES_USER
+              Value: !Ref PostgresDBUser
+            - Name: POSTGRES_PASSWORD
+              Value: !Ref PostgresDBPassword
+            - Name: REDIS_HOST
+              Value: !Ref RedisHost
+            - Name: REDIS_PORT
+              Value: !Ref RedisPort
+            - Name: REDIS_DB_NUMBER
+              Value: !Ref RedisDBNumber
+            - Name: WEBSERVER_HOSTNAME
+              Value: !Sub ${WebserverLoadBalancer.DNSName}
+            - Name: FERNET_KEY
+              Value: !Ref FernetKey
+            - Name: WORKER_QUEUE
+              Value: !Ref DefaultWorkerQueue
+            - Name: WORKER_POOL_SIZE
+              Value: !Ref DefaultWorkerConcurrency
+            - Name: WORKER_LOG_BUCKET
+              Value: !Ref LogBucket
+            - Name: OAUTH_SLACK_TOKEN
+              Value: !Ref OauthSlackToken
+          Command:
+            - flower
+
+  SchedulerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Volumes:
+        - Name: efs_mount
+          Host:
+            SourcePath: /efs_mount
+      ContainerDefinitions:
+        - Name: scheduler
+          Image: !Sub ${AirflowImageRepository}/${AirflowImageName}:${AirflowVersionTag}
+          MemoryReservation: 256
+          Essential: true
+          MountPoints:
+            - SourceVolume: efs_mount
+              ContainerPath: /usr/local/airflow/jobs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AirflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: scheduler
+          Environment:
+            - Name: POSTGRES_HOST
+              Value: !Ref PostgresDBHost
+            - Name: POSTGRES_DB
+              Value: !Ref PostgresDBScheme
+            - Name: POSTGRES_PORT
+              Value: !Ref PostgresDBPort
+            - Name: POSTGRES_USER
+              Value: !Ref PostgresDBUser
+            - Name: POSTGRES_PASSWORD
+              Value: !Ref PostgresDBPassword
+            - Name: REDIS_HOST
+              Value: !Ref RedisHost
+            - Name: REDIS_PORT
+              Value: !Ref RedisPort
+            - Name: WEBSERVER_HOSTNAME
+              Value: !Sub ${WebserverLoadBalancer.DNSName}
+            - Name: REDIS_DB_NUMBER
+              Value: !Ref RedisDBNumber
+            - Name: FERNET_KEY
+              Value: !Ref FernetKey
+            - Name: WORKER_QUEUE
+              Value: !Ref DefaultWorkerQueue
+            - Name: WORKER_POOL_SIZE
+              Value: !Ref DefaultWorkerConcurrency
+            - Name: WORKER_LOG_BUCKET
+              Value: !Ref LogBucket
+            - Name: OAUTH_SLACK_TOKEN
+              Value: !Ref OauthSlackToken
+          Command:
+            - scheduler
+
+  QueueDepthMonitorTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Volumes:
+        - Name: efs_mount
+          Host:
+            SourcePath: /efs_mount
+      ContainerDefinitions:
+        - Name: queue_depth_monitor
+          Image: !Sub ${AirflowImageRepository}/${AirflowImageName}:${AirflowVersionTag}
+          MemoryReservation: 256
+          Essential: true
+          MountPoints:
+            - SourceVolume: efs_mount
+              ContainerPath: /usr/local/airflow/jobs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AirflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: monitor
+          Environment:
+            - Name: POSTGRES_HOST
+              Value: !Ref PostgresDBHost
+            - Name: POSTGRES_DB
+              Value: !Ref PostgresDBScheme
+            - Name: POSTGRES_PORT
+              Value: !Ref PostgresDBPort
+            - Name: POSTGRES_USER
+              Value: !Ref PostgresDBUser
+            - Name: POSTGRES_PASSWORD
+              Value: !Ref PostgresDBPassword
+            - Name: REDIS_HOST
+              Value: !Ref RedisHost
+            - Name: REDIS_PORT
+              Value: !Ref RedisPort
+            - Name: REDIS_DB_NUMBER
+              Value: !Ref RedisDBNumber
+            - Name: WEBSERVER_HOSTNAME
+              Value: !Sub ${WebserverLoadBalancer.DNSName}
+            - Name: WORKER_QUEUE_LIST
+              Value: !Ref WorkersQueueMonitorList
+            - Name: FERNET_KEY
+              Value: !Ref FernetKey
+            - Name: WORKER_QUEUE
+              Value: !Ref DefaultWorkerQueue
+            - Name: WORKER_POOL_SIZE
+              Value: !Ref DefaultWorkerConcurrency
+            - Name: WORKER_LOG_BUCKET
+              Value: !Ref LogBucket
+            - Name: OAUTH_SLACK_TOKEN
+              Value: !Ref OauthSlackToken
+          Command:
+            - queue_depth_monitor.py
+
+  DagDeploymentTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Volumes:
+        - Name: efs_mount
+          Host:
+            SourcePath: /efs_mount
+      ContainerDefinitions:
+        - Name: dag_deployment
+          Image: !Sub ${AirflowImageRepository}/${AirflowImageName}:${AirflowVersionTag}
+          MemoryReservation: 256
+          Essential: true
+          MountPoints:
+            - SourceVolume: efs_mount
+              ContainerPath: /usr/local/airflow/jobs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AirflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: deployment
+          Environment:
+            - Name: POSTGRES_HOST
+              Value: !Ref PostgresDBHost
+            - Name: POSTGRES_DB
+              Value: !Ref PostgresDBScheme
+            - Name: POSTGRES_PORT
+              Value: !Ref PostgresDBPort
+            - Name: POSTGRES_USER
+              Value: !Ref PostgresDBUser
+            - Name: POSTGRES_PASSWORD
+              Value: !Ref PostgresDBPassword
+            - Name: REDIS_HOST
+              Value: !Ref RedisHost
+            - Name: REDIS_PORT
+              Value: !Ref RedisPort
+            - Name: REDIS_DB_NUMBER
+              Value: !Ref RedisDBNumber
+            - Name: WEBSERVER_HOSTNAME
+              Value: !Sub ${WebserverLoadBalancer.DNSName}
+            - Name: WORKER_QUEUE_LIST
+              Value: !Ref WorkersQueueMonitorList
+            - Name: FERNET_KEY
+              Value: !Ref FernetKey
+            - Name: WORKER_QUEUE
+              Value: !Ref DefaultWorkerQueue
+            - Name: WORKER_POOL_SIZE
+              Value: !Ref DefaultWorkerConcurrency
+            - Name: WORKER_LOG_BUCKET
+              Value: !Ref LogBucket
+            - Name: OAUTH_SLACK_TOKEN
+              Value: !Ref OauthSlackToken
+            - Name: BRANCH_NAME
+              Value: !Ref DagDeploymentBranch
+            - Name: ARTIFACTORY_REPO
+              Value: !Ref DagDeploymentRepo
+            - Name: ENVIRONMENT
+              Value: !Ref EcsClusterTagEnvironment
+          Command:
+            - /dag_deploy.sh
+
+  WebserverApplicationService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AirflowWebserverAutoScalingGroup
+      - WebserverAlbListener
+    Properties:
+      TaskDefinition: !Ref WebserverTask
+      DesiredCount: !Ref WebServersDesiredClusterSize
+      Cluster: !Ref AirflowWebserversEcsCluster
+      Role: !Ref EcsServiceRole
+      LoadBalancers:
+        - TargetGroupArn: !Ref WebserverAlbTargetGroup
+          ContainerPort: 8080
+          ContainerName: webserver
+
+  FlowerApplicationService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AirflowWebserverAutoScalingGroup
+      - FlowerAlbListener
+    Properties:
+      TaskDefinition: !Ref FlowerTask
+      DesiredCount: !Ref WebServersDesiredClusterSize
+      Cluster: !Ref AirflowWebserversEcsCluster
+      Role: !Ref EcsServiceRole
+      LoadBalancers:
+        - TargetGroupArn: !Ref FlowerAlbTargetGroup
+          ContainerPort: 5555
+          ContainerName: flower
+
+  SchedulerApplicationService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AirflowWebserverAutoScalingGroup
+    Properties:
+      TaskDefinition: !Ref SchedulerTask
+      DesiredCount: 1
+      Cluster: !Ref AirflowWebserversEcsCluster
+
+  QueueDepthMonitorApplicationService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AirflowWebserverAutoScalingGroup
+    Properties:
+      TaskDefinition: !Ref QueueDepthMonitorTask
+      DesiredCount: 1
+      Cluster: !Ref AirflowWebserversEcsCluster
+
+  DagDeploymentService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AirflowWebserverAutoScalingGroup
+    Properties:
+      TaskDefinition: !Ref DagDeploymentTask
+      DesiredCount: 1
+      Cluster: !Ref AirflowWebserversEcsCluster

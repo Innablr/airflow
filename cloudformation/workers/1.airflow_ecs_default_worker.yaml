@@ -1,0 +1,514 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Airflow Worker Stack
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy the Airflow worker stack into
+    Default: vpc-7ff3541b
+  WorkerSubnets:
+    Description: Subnets for the ECS Clusters Autoscaling Group
+    Type: List<AWS::EC2::Subnet::Id>
+    ConstraintDescription : must be a list of valid subnets for the selected Virtual Private Cloud
+    Default: subnet-1aa02a6c,subnet-dd6102b9
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: For SSH Access
+    Default: innablr-dev-dan
+  EcsInstanceRole:
+    Type: String
+    Description: The IAM role that the docker container host instance will use
+    Default: ecsInstanceRole
+  EcsServiceRole:
+    Type: String
+    Description: The IAM role that the docker containers will use
+    Default: ecsServiceRole
+  EcsServiceAutoscaleRole:
+    Type: String
+    Description: The IAM role that the docker containers will use to autoscale
+    Default: ecsAutoscaleRole
+  SSHIPRanges:
+    Type: CommaDelimitedList
+    Description: An origin CIDR for traffic from internal IPs to the cluster - MUST be 3 long list (or edit the SG using it below)
+    Default: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+  AirflowImageRepository:
+    Type: String
+    Description: The name of the Docker repository
+    Default: 055213226771.dkr.ecr.ap-southeast-2.amazonaws.com
+  AirflowImageName:
+    Type: String
+    Description: The name of the image in the repository
+    Default: airflow
+  AirflowVersionTag:
+    Type: String
+    Description: The version of the container image for docker to run
+    Default: latest
+  WorkersMaxClusterSize:
+    Type: Number
+    Description: Max number of Cluster Servers
+    Default: 10
+  WorkersDesiredClusterSize:
+    Type: Number
+    Description: Desired number of Cluster Servers
+    Default: 1
+  WorkersMinClusterSize:
+    Type: Number
+    Description: Minimum number of Cluster Servers
+    Default: 1
+  WorkerInstanceType:
+    Type: String
+    Description: The EC2 instance type for the host
+    AllowedValues:
+      - t2.small
+      - t2.medium
+      - t2.large
+    Default: t2.small
+  WorkerQueue:
+    Type: String
+    Description: queue name to use for default workers
+    Default: t2.small
+  WorkersPoolSize:
+    Type: String
+    Description: Default pool size for celery worker nodes
+    Default: 8
+  EcsClusterTagSchedule:
+    Type: String
+    Description: Availability schedule tag to configure on the ECS cluster members
+    Default: Stop=21:00|Sun-Sat;Override=off
+  EcsClusterTagApplicationName:
+    Type: String
+    Description: Application name tag
+    Default: Airflow
+  EcsClusterTagEnvironment:
+    Type: String
+    Description: Environment name tag
+    Default: development
+  EcsClusterTagOwnerDescription:
+    Type: String
+    Description: Owner Description tag
+    Default: dan@somewhere.com
+  EcsClusterTagCostCentre:
+    Type: String
+    Description: Cost Centre tag
+    Default: Analytics
+  PostgresDBScheme:
+    Type: String
+    Description: Postgres Database schema name
+    Default: airflow
+  PostgresDBHost:
+    Type: String
+    Description: Postgres Database server
+    Default: dev.cs7dqi8chzib.ap-southeast-2.rds.amazonaws.com
+  PostgresDBPort:
+    Type: Number
+    Description: Postgres Database port
+    Default: 5432
+  PostgresDBUser:
+    Type: String
+    Description: Postgres Database username
+    Default: administrator
+  PostgresDBPassword:
+    Type: String
+    Description: Postgres Database password (To be replaced with param and key name for entrypoint to grab)
+    Default: airflow1
+  RedisHost:
+    Type: String
+    Description: Redis host name
+    Default: dev.uoyjeg.0001.apse2.cache.amazonaws.com
+  RedisPort:
+    Type: Number
+    Description: Redis port number
+    Default: 6379
+  RedisDBNumber:
+    Type: Number
+    Description: Redis db schema number
+    Default: 1
+  WorkersQueueDepthUpAlarmThreshold:
+    Type: Number
+    Description: The number of tasks within the default queue to alarm on and therefore cause autoscaling
+    Default: 50
+  WorkersQueueDepthDownAlarmThreshold:
+    Type: Number
+    Description: The number of tasks within the default queue to alarm on and therefore cause autoscaling
+    Default: 10
+  FernetKey:
+    Type: String
+    Description: Secret key for generating the symetric encryption within Airflow (between servers)
+    Default: xDrkhb87MzHHWjTjI7b48I_RpsR9fKbLqnza3jidWAo=
+  LogBucket:
+    Type: String
+    Description: The log bucket to send the worker logs to when they finish
+  OauthSlackToken:
+    Type: String
+    Description: The token to use to send send slack messages with
+  WebserverHostname:
+    Type: String
+    Description: The server host name for the worker to send emails with the correct link to logs in (needed from app-stack)
+    Default: internal-devel-Webse-S829FR8NERE3-1367309195.ap-southeast-2.elb.amazonaws.com
+  FileSystem:
+    Type: String
+    Description: The EFS filesystem created as part of the app spin up (needed from app-stack)
+    Default: fs-47df3f7e
+
+Mappings:
+  RegionalConfiguration:
+    ap-southeast-2:
+      EcsAmi: ami-42e9f921
+      ElbAccountId: 783225319266
+    eu-west-1:
+      EcsAmi: ami-809f84e6
+      ElbAccountId: 156460612806
+
+Resources:
+  AirflowWorkersEcsClusterSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permit traffic from cluster to the workers
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Select [0, !Ref SSHIPRanges]
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Select [1, !Ref SSHIPRanges]
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Select [2, !Ref SSHIPRanges]
+        - IpProtocol: tcp
+          FromPort: 8793
+          ToPort: 8793
+          CidrIp: !Select [0, !Ref SSHIPRanges]
+        - IpProtocol: tcp
+          FromPort: 8793
+          ToPort: 8793
+          CidrIp: !Select [1, !Ref SSHIPRanges]
+        - IpProtocol: tcp
+          FromPort: 8793
+          ToPort: 8793
+          CidrIp: !Select [2, !Ref SSHIPRanges]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-APP
+
+  WorkerLogS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketName: !Ref LogBucket
+
+  AirflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  AirflowEcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DeletionPolicy: Retain
+    Properties:
+      Roles:
+        - !Ref EcsInstanceRole
+
+  WorkersEcsCluster:
+    Type: AWS::ECS::Cluster
+
+  WorkerEcsLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [RegionalConfiguration, !Ref "AWS::Region", EcsAmi]
+      InstanceType: !Ref WorkerInstanceType
+      InstanceMonitoring: true
+      IamInstanceProfile: !Ref AirflowEcsInstanceProfile
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - !Ref AirflowWorkersEcsClusterSG
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #cloud-config
+            write_files:
+              - path: /tmp/mount_efs.sh
+                permissions: '0770'
+                content: |
+                  #!/bin/bash -xe
+                  yum install -y aws-cfn-bootstrap nfs-utils aws-cli
+                  mkdir /efs_mount
+                  INTERFACE=$(curl --silent http://169.254.169.254/latest/meta-data/network/interfaces/macs/)
+                  SUBNET_ID=$(curl --silent http://169.254.169.254/latest/meta-data/network/interfaces/macs/$INTERFACE/subnet-id)
+                  EFS_IP=$(aws efs describe-mount-targets --file-system-id ${FileSystem} --region ${AWS::Region} --output text | grep  $SUBNET_ID | awk -F '\t' '{print $3}')
+                  MOUNT_IP_COUNT=$(grep -c $EFS_IP /etc/fstab)
+                  if [ $MOUNT_IP_COUNT -eq 0 ]; then
+                      echo "$EFS_IP:/ /efs_mount nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0" >> /etc/fstab
+                  fi
+            runcmd:
+              - stop ecs
+              - /bin/bash /tmp/mount_efs.sh
+              - echo ECS_CLUSTER=${WorkersEcsCluster} >> /etc/ecs/ecs.config
+              - mount -a -t nfs4
+              - chmod 777 /efs_mount
+              - /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
+              - start ecs
+
+  WorkerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+    Properties:
+      LaunchConfigurationName: !Ref WorkerEcsLaunchConfiguration
+      VPCZoneIdentifier: !Ref WorkerSubnets
+      MaxSize: !Ref WorkersMaxClusterSize
+      MinSize: !Ref WorkersMinClusterSize
+      DesiredCapacity: !Ref WorkersDesiredClusterSize
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-airflow-default-workers-cluster
+          PropagateAtLaunch: true
+        - Key: Schedule
+          Value: !Ref EcsClusterTagSchedule
+          PropagateAtLaunch: true
+        - Key: Application
+          Value: !Ref EcsClusterTagApplicationName
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref EcsClusterTagEnvironment
+          PropagateAtLaunch: true
+        - Key: Service
+          Value: Airflow
+          PropagateAtLaunch: true
+        - Key: CostCentre
+          Value: !Ref EcsClusterTagCostCentre
+          PropagateAtLaunch: true
+        - Key: OwnerDescription
+          Value: !Ref EcsClusterTagOwnerDescription
+          PropagateAtLaunch: true
+
+  WorkerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Volumes:
+        - Name: efs_mount
+          Host:
+            SourcePath: /efs_mount
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub ${AirflowImageRepository}/${AirflowImageName}:${AirflowVersionTag}
+          MemoryReservation: 256
+          Essential: true
+          MountPoints:
+            - SourceVolume: efs_mount
+              ContainerPath: /usr/local/airflow/jobs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AirflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+          PortMappings:
+            - ContainerPort: 8793
+              HostPort: 8793
+          Environment:
+            - Name: POSTGRES_HOST
+              Value: !Ref PostgresDBHost
+            - Name: POSTGRES_DB
+              Value: !Ref PostgresDBScheme
+            - Name: POSTGRES_PORT
+              Value: !Ref PostgresDBPort
+            - Name: POSTGRES_USER
+              Value: !Ref PostgresDBUser
+            - Name: POSTGRES_PASSWORD
+              Value: !Ref PostgresDBPassword
+            - Name: REDIS_HOST
+              Value: !Ref RedisHost
+            - Name: REDIS_PORT
+              Value: !Ref RedisPort
+            - Name: REDIS_DB_NUMBER
+              Value: !Ref RedisDBNumber
+            - Name: WEBSERVER_HOSTNAME
+              Value: !Ref WebserverHostname
+            - Name: WORKER_POOL_SIZE
+              Value: !Ref WorkersPoolSize
+            - Name: WORKER_QUEUE
+              Value: !Ref WorkerQueue
+            - Name: FERNET_KEY
+              Value: !Ref FernetKey
+            - Name: WORKER_LOG_BUCKET
+              Value: !Ref LogBucket
+            - Name: OAUTH_SLACK_TOKEN
+              Value: !Ref OauthSlackToken
+          Command:
+            - worker
+
+  WorkersApplicationService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - WorkerAutoScalingGroup
+    Properties:
+      TaskDefinition: !Ref WorkerTask
+      DesiredCount: !Ref WorkersDesiredClusterSize
+      Cluster: !Ref WorkersEcsCluster
+
+  WorkersQueueDepthEcsUpAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: WorkersECSAutoScalingUpPolicy
+    Properties:
+      AlarmDescription:
+        "Alarm if default queue is over threshold for ECS scaling"
+      Namespace: Airflow
+      MetricName: QueueDepthWaiting
+      Dimensions:
+        - Name: Queue Name
+          Value: !Ref WorkerQueue
+      Statistic: Maximum
+      Period: '60'
+      AlarmActions:
+        - !Ref 'WorkersECSAutoScalingUpPolicy'
+      EvaluationPeriods: '2'
+      Threshold:
+        !Ref WorkersQueueDepthUpAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+
+  WorkersECSAutoScalingUpPolicy:
+    Type : "AWS::ApplicationAutoScaling::ScalingPolicy"
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-default-workers-ecs-up-scalingpolicy
+      PolicyType: StepScaling
+      ScalableDimension: ecs:service:DesiredCount
+      ScalingTargetId: !Ref WorkersECSScalableTarget
+      ServiceNamespace: ecs
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 180
+        MetricAggregationType: Maximum
+        StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 100
+
+  WorkersQueueDepthEcsDownAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: WorkersECSAutoScalingDownPolicy
+    Properties:
+      AlarmDescription:
+        "Alarm if default queue is over threshold for ECS scaling"
+      Namespace: Airflow
+      MetricName: QueueDepthWaitingAndRunning
+      Dimensions:
+        - Name: Queue Name
+          Value: !Ref WorkerQueue
+      Statistic: Maximum
+      Period: '60'
+      AlarmActions:
+        - !Ref 'WorkersECSAutoScalingDownPolicy'
+      EvaluationPeriods: '2'
+      Threshold:
+        !Ref WorkersQueueDepthDownAlarmThreshold
+      ComparisonOperator: LessThanThreshold
+
+  WorkersECSAutoScalingDownPolicy:
+    Type : "AWS::ApplicationAutoScaling::ScalingPolicy"
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-default-workers-ecs-down-scalingpolicy
+      PolicyType: StepScaling
+      ScalableDimension: ecs:service:DesiredCount
+      ScalingTargetId: !Ref WorkersECSScalableTarget
+      ServiceNamespace: ecs
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 180
+        MetricAggregationType: Maximum
+        StepAdjustments:
+        - MetricIntervalUpperBound: 10
+          MetricIntervalLowerBound: -11
+          ScalingAdjustment: -50
+        - MetricIntervalLowerBound: 10
+          ScalingAdjustment: 0
+        - MetricIntervalUpperBound: -11
+          ScalingAdjustment: 0
+
+
+  WorkersECSScalableTarget:
+    Type: "AWS::ApplicationAutoScaling::ScalableTarget"
+    DependsOn: WorkersApplicationService
+    Properties:
+      MaxCapacity: !Ref WorkersMaxClusterSize
+      MinCapacity: !Ref WorkersMinClusterSize
+      ResourceId: !Join ['', [service/, !Ref 'WorkersEcsCluster', /, !GetAtt [WorkersApplicationService, Name]]]
+      RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/${EcsServiceAutoscaleRole}
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  WorkersQueueDepthEC2UpAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: WorkersEC2AutoScalingUpPolicy
+    Properties:
+      AlarmDescription:
+        "Alarm if default queue is over threshold for EC2 scaling up"
+      Namespace: Airflow
+      MetricName: QueueDepthWaiting
+      Dimensions:
+        - Name: Queue Name
+          Value: !Ref WorkerQueue
+      Statistic: Maximum
+      Period: '60'
+      AlarmActions:
+        - !Ref 'WorkersEC2AutoScalingUpPolicy'
+      EvaluationPeriods: '2'
+      Threshold:
+        !Ref WorkersQueueDepthUpAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+
+  WorkersEC2AutoScalingUpPolicy:
+    Type : "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      AutoScalingGroupName:
+        !Ref WorkerAutoScalingGroup
+      MetricAggregationType: Maximum
+      EstimatedInstanceWarmup: 180
+      PolicyType: StepScaling
+      StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 100
+
+  WorkersQueueDepthEC2DownAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: WorkersEC2AutoScalingUpPolicy
+    Properties:
+      AlarmDescription:
+        "Alarm if default queue is under threshold for EC2 scaling down"
+      Namespace: Airflow
+      MetricName: QueueDepthWaitingAndRunning
+      Dimensions:
+        - Name: Queue Name
+          Value: !Ref WorkerQueue
+      Statistic: Maximum
+      Period: '60'
+      AlarmActions:
+        - !Ref 'WorkersEC2AutoScalingDownPolicy'
+      EvaluationPeriods: '2'
+      Threshold:
+        !Ref WorkersQueueDepthDownAlarmThreshold
+      ComparisonOperator: LessThanThreshold
+
+  WorkersEC2AutoScalingDownPolicy:
+    Type : "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      AutoScalingGroupName:
+        !Ref WorkerAutoScalingGroup
+      MetricAggregationType: Maximum
+      EstimatedInstanceWarmup: 180
+      PolicyType: StepScaling
+      StepAdjustments:
+        - MetricIntervalUpperBound: 10
+          MetricIntervalLowerBound: -11
+          ScalingAdjustment: -50
+        - MetricIntervalLowerBound: 10
+          ScalingAdjustment: 0
+        - MetricIntervalUpperBound: -11
+          ScalingAdjustment: 0
+

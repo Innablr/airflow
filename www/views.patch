@@ -1,0 +1,96 @@
+--- views.server.orig.py	2017-08-03 12:46:15.000000000 +1000
++++ views.server.patched0.py	2017-08-04 12:03:46.000000000 +1000
+@@ -74,6 +74,7 @@
+ from airflow.www import utils as wwwutils
+ from airflow.www.forms import DateTimeForm, DateTimeWithNumRunsForm
+ from airflow.configuration import AirflowConfigException
++import logging
+ 
+ QUERY_LIMIT = 100000
+ CHART_LIMIT = 200000
+@@ -2235,6 +2236,28 @@
+         start_date=datetime_f,
+         dag_id=dag_link)
+ 
++    def get_query(self):
++        do_filter = FILTER_BY_OWNER and (not current_user.is_superuser())
++        owner_mode = conf.get('webserver', 'OWNER_MODE').strip().lower()
++        DM = models.DagModel
++        DR = models.DagRun
++        qry = super(DagRunModelView, self).get_query().join(DM, DM.dag_id == DR.dag_id)
++        if do_filter and owner_mode == 'ldapgroup':
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active,
++                DM.owners.in_(current_user.ldap_groups)
++            )
++        elif do_filter and owner_mode == 'user':
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active,
++                DM.owners == current_user.user.username
++            )
++        else:
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active
++            )
++        return qry_fltr
++
+     @action('new_delete', "Delete", "Are you sure you want to delete selected records?")
+     def action_new_delete(self, ids):
+         session = settings.Session()
+@@ -2296,6 +2319,27 @@
+     column_formatters = dict(
+         dttm=datetime_f, execution_date=datetime_f, dag_id=dag_link)
+ 
++    def get_query(self):
++        do_filter = FILTER_BY_OWNER and (not current_user.is_superuser())
++        owner_mode = conf.get('webserver', 'OWNER_MODE').strip().lower()
++        DM = models.DagModel
++        LM = models.Log
++        qry = super(LogModelView, self).get_query().join(DM, DM.dag_id == LM.dag_id)
++        if do_filter and owner_mode == 'ldapgroup':
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active,
++                DM.owners.in_(current_user.ldap_groups)
++            )
++        elif do_filter and owner_mode == 'user':
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active,
++                DM.owners == current_user.user.username
++            )
++        else:
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active
++            )
++        return qry_fltr
+ 
+ class TaskInstanceModelView(ModelViewOnly):
+     verbose_name_plural = "task instances"
+@@ -2331,6 +2375,28 @@
+     can_delete = True
+     page_size = 500
+ 
++    def get_query(self):
++        do_filter = FILTER_BY_OWNER and (not current_user.is_superuser())
++        owner_mode = conf.get('webserver', 'OWNER_MODE').strip().lower()
++        DM = models.DagModel
++        TI = models.TaskInstance
++        qry = super(TaskInstanceModelView, self).get_query().join(DM, DM.dag_id == TI.dag_id)
++        if do_filter and owner_mode == 'ldapgroup':
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active,
++                DM.owners.in_(current_user.ldap_groups)
++            )
++        elif do_filter and owner_mode == 'user':
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active,
++                DM.owners == current_user.user.username
++            )
++        else:
++            qry_fltr = qry.filter(
++                ~DM.is_subdag, DM.is_active
++            )
++        return qry_fltr
++
+     @action('set_running', "Set state to 'running'", None)
+     def action_set_running(self, ids):
+         self.set_task_instance_state(ids, State.RUNNING)
